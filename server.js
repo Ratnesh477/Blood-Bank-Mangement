@@ -13,21 +13,36 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(helmet());
+
 app.use(cors({
-    origin: ['http://localhost:3000', 'http://127.0.0.1:5500', 'http://localhost:8080', 'http://127.0.0.1:8080'],
+    origin: [
+        'http://localhost:3000',
+        'http://127.0.0.1:5500',
+        'http://localhost:8080',
+        'http://127.0.0.1:8080',
+        'https://your-frontend-app.onrender.com',    // Replace with your Render frontend URL
+        'https://blood-bank-mangement.onrender.com'  // Your backend deployment URL (kept as is)
+    ],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true
 }));
+
+// Request logging middleware moved near the top
+app.use((req, res, next) => {
+    console.log(`${req.method} ${req.originalUrl}`);
+    next();
+});
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // Rate limiting
 const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
+    windowMs: 15 * 60 * 1000, // 15 mins
     max: 100
 });
-app.use('/api/', limiter);
+app.use('/api', limiter);
 
 // MongoDB Connection
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/bloodbank';
@@ -181,7 +196,7 @@ const checkBloodCompatibility = (recipientBloodType, donorBloodType) => {
         'O+': ['O+', 'O-'],
         'O-': ['O-']
     };
-    
+
     return compatibility[recipientBloodType]?.includes(donorBloodType) || false;
 };
 
@@ -197,19 +212,18 @@ const checkExpiredBlood = async () => {
 
 // Health Check
 app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'OK', 
+    res.json({
+        status: 'OK',
         timestamp: new Date().toISOString(),
         mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
     });
 });
 
 // Dashboard Stats
-
 app.get('/api/stats', async (req, res) => {
     try {
         await checkExpiredBlood();
-        
+
         const [donors, recipients, inventory, requests] = await Promise.all([
             Donor.countDocuments({ isActive: true }),
             Recipient.countDocuments(),
@@ -219,9 +233,9 @@ app.get('/api/stats', async (req, res) => {
             ]),
             Request.countDocuments({ status: 'pending' })
         ]);
-        
+
         const totalUnits = inventory.length > 0 ? inventory[0].totalUnits : 0;
-        
+
         res.json({
             success: true,
             data: {
@@ -256,7 +270,6 @@ app.get('/api/donors', async (req, res) => {
 
 app.post('/api/donors', validateDonor, handleValidationErrors, async (req, res) => {
     try {
-        // Check for duplicate email
         const existingDonor = await Donor.findOne({ email: req.body.email });
         if (existingDonor) {
             return res.status(400).json({
@@ -264,10 +277,10 @@ app.post('/api/donors', validateDonor, handleValidationErrors, async (req, res) 
                 error: 'A donor with this email already exists'
             });
         }
-        
+
         const donor = new Donor(req.body);
         await donor.save();
-        
+
         res.status(201).json({
             success: true,
             message: 'Donor registered successfully',
@@ -319,7 +332,7 @@ app.post('/api/recipients', validateRecipient, handleValidationErrors, async (re
     try {
         const recipient = new Recipient(req.body);
         await recipient.save();
-        
+
         // Auto-create blood request
         const request = new Request({
             recipientId: recipient._id,
@@ -330,7 +343,7 @@ app.post('/api/recipients', validateRecipient, handleValidationErrors, async (re
             urgency: recipient.urgency
         });
         await request.save();
-        
+
         res.status(201).json({
             success: true,
             message: 'Recipient registered and blood request created successfully',
@@ -366,7 +379,7 @@ app.post('/api/inventory', validateInventory, handleValidationErrors, async (req
     try {
         const inventory = new Inventory(req.body);
         await inventory.save();
-        
+
         res.status(201).json({
             success: true,
             message: 'Blood units added to inventory successfully',
@@ -386,14 +399,14 @@ app.get('/api/inventory/availability/:bloodType', async (req, res) => {
     try {
         await checkExpiredBlood();
         const { bloodType } = req.params;
-        
+
         const availability = await Inventory.aggregate([
             { $match: { bloodType: bloodType, status: 'available' } },
             { $group: { _id: null, totalUnits: { $sum: '$units' } } }
         ]);
-        
+
         const totalUnits = availability.length > 0 ? availability[0].totalUnits : 0;
-        
+
         res.json({
             success: true,
             bloodType: bloodType,
@@ -412,7 +425,6 @@ app.get('/api/inventory/availability/:bloodType', async (req, res) => {
 // Requests Routes
 app.get('/api/requests', async (req, res) => {
     try {
-        const urgencyOrder = { Critical: 1, High: 2, Medium: 3, Low: 4 };
         const requests = await Request.aggregate([
             {
                 $addFields: {
@@ -431,7 +443,6 @@ app.get('/api/requests', async (req, res) => {
             },
             { $sort: { urgencyPriority: 1, createdAt: -1 } }
         ]);
-        // Populate recipientId fields manually
         const populatedRequests = await Request.populate(requests, { path: 'recipientId', select: 'name phone hospital' });
         res.json(populatedRequests);
     } catch (error) {
@@ -452,32 +463,32 @@ app.put('/api/requests/:id/approve', async (req, res) => {
                 error: 'Request not found'
             });
         }
-        
+
         // Check blood availability
         const availability = await Inventory.aggregate([
             { $match: { bloodType: request.bloodType, status: 'available' } },
             { $group: { _id: null, totalUnits: { $sum: '$units' } } }
         ]);
-        
+
         const availableUnits = availability.length > 0 ? availability[0].totalUnits : 0;
-        
+
         if (availableUnits < request.units) {
             return res.status(400).json({
                 success: false,
                 error: `Insufficient blood units. Available: ${availableUnits}, Required: ${request.units}`
             });
         }
-        
+
         // Reserve blood units
         let unitsToReserve = request.units;
-        const inventoryItems = await Inventory.find({ 
-            bloodType: request.bloodType, 
-            status: 'available' 
+        const inventoryItems = await Inventory.find({
+            bloodType: request.bloodType,
+            status: 'available'
         }).sort({ expiryDate: 1 });
-        
+
         for (const item of inventoryItems) {
             if (unitsToReserve <= 0) break;
-            
+
             if (item.units <= unitsToReserve) {
                 item.status = 'reserved';
                 unitsToReserve -= item.units;
@@ -493,24 +504,23 @@ app.put('/api/requests/:id/approve', async (req, res) => {
                     collectionDate: item.collectionDate
                 });
                 await newItem.save();
-                
+
                 item.units -= unitsToReserve;
                 await item.save();
                 unitsToReserve = 0;
             }
         }
-        
+
         request.status = 'approved';
         request.processedBy = 'System Admin';
         request.updatedAt = new Date();
         await request.save();
-        
-        // Update recipient status
-        await Recipient.findByIdAndUpdate(request.recipientId, { 
+
+        await Recipient.findByIdAndUpdate(request.recipientId, {
             status: 'approved',
             updatedAt: new Date()
         });
-        
+
         res.json({
             success: true,
             message: 'Request approved and blood units reserved successfully',
@@ -534,19 +544,18 @@ app.put('/api/requests/:id/reject', async (req, res) => {
                 error: 'Request not found'
             });
         }
-        
+
         request.status = 'rejected';
         request.processedBy = 'System Admin';
         request.notes = req.body.notes || 'Request rejected by admin';
         request.updatedAt = new Date();
         await request.save();
-        
-        // Update recipient status
-        await Recipient.findByIdAndUpdate(request.recipientId, { 
+
+        await Recipient.findByIdAndUpdate(request.recipientId, {
             status: 'rejected',
             updatedAt: new Date()
         });
-        
+
         res.json({
             success: true,
             message: 'Request rejected successfully',
@@ -565,7 +574,7 @@ app.put('/api/requests/:id/reject', async (req, res) => {
 app.get('/api/compatibility/:recipientBloodType/:donorBloodType', (req, res) => {
     const { recipientBloodType, donorBloodType } = req.params;
     const isCompatible = checkBloodCompatibility(recipientBloodType, donorBloodType);
-    
+
     res.json({
         success: true,
         recipientBloodType,
@@ -579,15 +588,15 @@ app.get('/api/search/donors', async (req, res) => {
     try {
         const { bloodType, name } = req.query;
         let query = { isActive: true };
-        
+
         if (bloodType) {
             query.bloodType = bloodType;
         }
-        
+
         if (name) {
             query.name = { $regex: name, $options: 'i' };
         }
-        
+
         const donors = await Donor.find(query).sort({ createdAt: -1 });
         res.json(donors);
     } catch (error) {
@@ -599,7 +608,7 @@ app.get('/api/search/donors', async (req, res) => {
     }
 });
 
-// Error handling middleware
+// Error handling middleware (keep it before 404)
 app.use((err, req, res, next) => {
     console.error(err.stack);
     res.status(500).json({
@@ -609,7 +618,7 @@ app.use((err, req, res, next) => {
     });
 });
 
-// 404 handler
+// 404 handler (last middleware)
 app.use((req, res) => {
     res.status(404).json({
         success: false,
@@ -620,8 +629,8 @@ app.use((req, res) => {
 // Start server
 app.listen(PORT, () => {
     console.log(`🚀 Blood Bank Management Server running on port ${PORT}`);
-    console.log(`📊 Dashboard: http://localhost:${PORT}/health`);
-    console.log(`🔗 API Base URL: http://localhost:${PORT}/api`);
+    console.log(`📊 Dashboard: https://blood-bank-mangement.onrender.com/`);
+    console.log(`🔗 API Base URL: https://blood-bank-mangement.onrender.com/`);
 });
 
 // Graceful shutdown
